@@ -40,7 +40,10 @@ import sys
 import os
 
 current_path = os.path.dirname(os.path.abspath(__file__))
-python_path = os.path.abspath( os.path.join(current_path, os.pardir, os.pardir, 'python27', '1.0'))
+root_path = os.path.abspath( os.path.join(current_path, os.pardir, os.pardir))
+data_path = os.path.join(root_path, 'data')
+data_gae_proxy_path = os.path.join(data_path, 'gae_proxy')
+python_path = os.path.abspath( os.path.join(root_path, 'python27', '1.0'))
 
 noarch_lib = os.path.abspath( os.path.join(python_path, 'lib', 'noarch'))
 sys.path.append(noarch_lib)
@@ -60,12 +63,8 @@ elif sys.platform == "darwin":
 import time
 import traceback
 import platform
-
-import errno
-import xlog
 import random
 import threading
-import SocketServer
 import urllib2
 
 __file__ = os.path.abspath(__file__)
@@ -74,54 +73,37 @@ if os.path.islink(__file__):
 work_path = os.path.dirname(os.path.abspath(__file__))
 os.chdir(work_path)
 
+
+def create_data_path():
+    if not os.path.isdir(data_path):
+        os.mkdir(data_path)
+
+    if not os.path.isdir(data_gae_proxy_path):
+        os.mkdir(data_gae_proxy_path)
+create_data_path()
+
+
+from config import config
+
+from xlog import getLogger
+xlog = getLogger("gae_proxy")
+xlog.set_buffer(500)
+if config.log_file:
+    log_file = os.path.join(data_gae_proxy_path, "local.log")
+    xlog.set_file(log_file)
+
 from cert_util import CertUtil
 import pac_server
-
-import socket, ssl
-NetWorkIOError = (socket.error, ssl.SSLError, OSError)
-
+import simple_http_server
 import proxy_handler
 import connect_control
 import env_info
-from config import config
-
+import connect_manager
 from gae_handler import spawn_later
 
+
+# launcher/module_init will check this value for start/stop finished
 ready = False
-
-
-
-
-
-class LocalProxyServer(SocketServer.ThreadingTCPServer):
-    """Local Proxy Server"""
-    allow_reuse_address = True
-
-    def close_request(self, request):
-        try:
-            request.close()
-        except Exception:
-            pass
-
-    def finish_request(self, request, client_address):
-        try:
-            self.RequestHandlerClass(request, client_address, self)
-        except NetWorkIOError as e:
-            if e[0] not in (errno.ECONNABORTED, errno.ECONNRESET, errno.EPIPE):
-                raise
-
-    def handle_error(self, *args):
-        """make ThreadingTCPServer happy"""
-        etype, value = sys.exc_info()[:2]
-        if isinstance(value, NetWorkIOError) and 'bad write retry' in value.args[1]:
-            etype = value = None
-        else:
-            del etype, value
-            SocketServer.ThreadingTCPServer.handle_error(self, *args)
-
-
-
-
 
 def pre_start():
 
@@ -203,13 +185,11 @@ def pre_start():
                 error = u'某些安全软件(如 %s)可能和本软件存在冲突，造成 CPU 占用过高。\n如有此现象建议暂时退出此安全软件来继续运行GoAgent' % ','.join(softwares)
                 ctypes.windll.user32.MessageBoxW(None, error, title, 0)
                 #sys.exit(0)
-    if config.GAE_APPIDS[0] == 'gae_proxy':
-        xlog.critical('please edit %s to add your appid to [gae] !', config.CONFIG_FILENAME)
-        sys.exit(-1)
     if config.PAC_ENABLE:
         pac_ip = config.PAC_IP
         url = 'http://%s:%d/%s' % (pac_ip, config.PAC_PORT, config.PAC_FILE)
         spawn_later(600, urllib2.build_opener(urllib2.ProxyHandler({})).open, url)
+
 
 def log_info():
     xlog.info('------------------------------------------------------')
@@ -226,8 +206,15 @@ def log_info():
         #info += 'Pac File           : file://%s\n' % os.path.join(self.DATA_PATH, self.PAC_FILE)
     xlog.info('------------------------------------------------------')
 
+
 def main():
     global ready
+
+    connect_control.keep_running = True
+    config.load()
+    connect_manager.https_manager.load_config()
+
+    xlog.debug("## GAEProxy set keep_running: %s", connect_control.keep_running)
     # to profile gae_proxy, run proxy.py, visit some web by proxy, then visit http://127.0.0.1:8084/quit to quit and print result.
     do_profile = False
     if do_profile:
@@ -240,24 +227,24 @@ def main():
     if os.path.islink(__file__):
         __file__ = getattr(os, 'readlink', lambda x: x)(__file__)
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
-    xlog.basicConfig(level=xlog.DEBUG if config.LISTEN_DEBUGINFO else xlog.INFO, format='%(levelname)s - %(asctime)s %(message)s', datefmt='[%b %d %H:%M:%S]')
+    #xlog.basicConfig(level=xlog.DEBUG if config.LISTEN_DEBUGINFO else xlog.INFO, format='%(levelname)s - %(asctime)s %(message)s', datefmt='[%b %d %H:%M:%S]')
     pre_start()
     log_info()
 
     CertUtil.init_ca()
 
-    proxy_daemon = LocalProxyServer((config.LISTEN_IP, config.LISTEN_PORT), proxy_handler.GAEProxyHandler)
+    proxy_daemon = simple_http_server.HTTPServer((config.LISTEN_IP, config.LISTEN_PORT), proxy_handler.GAEProxyHandler)
     proxy_thread = threading.Thread(target=proxy_daemon.serve_forever)
     proxy_thread.setDaemon(True)
     proxy_thread.start()
 
     if config.PAC_ENABLE:
-        pac_daemon = LocalProxyServer((config.PAC_IP, config.PAC_PORT), pac_server.PACServerHandler)
+        pac_daemon = simple_http_server.HTTPServer((config.PAC_IP, config.PAC_PORT), pac_server.PACServerHandler)
         pac_thread = threading.Thread(target=pac_daemon.serve_forever)
         pac_thread.setDaemon(True)
         pac_thread.start()
 
-    ready = True #checked by launcher.module_init
+    ready = True  # checked by launcher.module_init
 
     while connect_control.keep_running:
         time.sleep(1)
@@ -270,15 +257,20 @@ def main():
         pac_daemon.shutdown()
         pac_daemon.server_close()
         pac_thread.join()
-    ready = False #checked by launcher.module_init
-    xlog.info("Finished Exiting gae_proxy module...")
+    ready = False  # checked by launcher.module_init
+    xlog.debug("## GAEProxy set keep_running: %s", connect_control.keep_running)
 
     if do_profile:
         pr.disable()
         pr.print_stats()
 
+
+# called by launcher/module/stop
 def terminate():
+    xlog.info("start to terminate GAE_Proxy")
     connect_control.keep_running = False
+    xlog.debug("## Set keep_running: %s", connect_control.keep_running)
+
 
 if __name__ == '__main__':
     try:

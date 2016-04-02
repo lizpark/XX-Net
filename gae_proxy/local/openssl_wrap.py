@@ -1,28 +1,48 @@
 
 # OpenSSL is more stable then ssl
 # but OpenSSL is different then ssl, so need a wrapper
+
+# this wrap has a close callback.
+# Which is used by google ip manager(google_ip.py)
+# google ip manager keep a connection number counter for every ip.
+
+# the wrap is used to keep some attribute like ip/appid for ssl
+
+# __iowait and makefile is used for gevent but not use now.
+
+
 import sys
 import os
-
+import select
+import time
+import socket
 
 import OpenSSL
 SSLError = OpenSSL.SSL.WantReadError
 
-import select
-import time
-import socket
-import xlog
+
+from xlog import getLogger
+xlog = getLogger("gae_proxy")
 
 ssl_version = ''
 
 class SSLConnection(object):
     """OpenSSL Connection Wrapper"""
 
-    def __init__(self, context, sock):
+    def __init__(self, context, sock, ip=None, on_close=None):
         self._context = context
         self._sock = sock
+        self.ip = ip
         self._connection = OpenSSL.SSL.Connection(context, sock)
         self._makefile_refs = 0
+        self.on_close = on_close
+
+    def __del__(self):
+        if self._sock:
+            socket.socket.close(self._sock)
+            self._sock = None
+            if self.on_close:
+                self.on_close(self.ip)
 
     def __getattr__(self, attr):
         if attr not in ('_context', '_sock', '_connection', '_makefile_refs'):
@@ -104,6 +124,9 @@ class SSLConnection(object):
             self._connection = None
             if self._sock:
                 socket.socket.close(self._sock)
+                self._sock = None
+                if self.on_close:
+                    self.on_close(self.ip)
         else:
             self._makefile_refs -= 1
 
@@ -114,6 +137,8 @@ class SSLConnection(object):
     @staticmethod
     def context_builder(ca_certs=None, cipher_suites=('ALL:!RC4-SHA:!ECDHE-RSA-RC4-SHA:!ECDHE-RSA-AES128-GCM-SHA256:!AES128-GCM-SHA256',)):
         # 'ALL', '!aNULL', '!eNULL'
+        # change default cipher suites.
+        # Google video ip can act as Google FrontEnd if cipher suits not include RC4-SHA:ECDHE-RSA-RC4-SHA:ECDHE-RSA-AES128-GCM-SHA256:AES128-GCM-SHA256
         global  ssl_version
 
         if not ssl_version:
@@ -127,6 +152,14 @@ class SSLConnection(object):
                 ssl_version = "SSLv23"
 
             if sys.platform == "darwin":
+                # MacOS pyOpenSSL has TLSv1_2_METHOD attr but can use.
+                # There for we hard code here.
+                # may be try/cache is a better solution.
+                ssl_version = "TLSv1"
+
+            # freenas openssl support fix from twitter user "himanzero"
+            # https://twitter.com/himanzero/status/645231724318748672
+            if sys.platform == "freebsd9":
                 ssl_version = "TLSv1"
 
             xlog.info("SSL use version:%s", ssl_version)

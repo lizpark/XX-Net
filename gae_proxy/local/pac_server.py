@@ -1,18 +1,19 @@
 #!/usr/bin/env python
 # coding:utf-8
 
-import sys
 import os
-import glob
 import base64
 import time
 import re
-import xlog
 import thread
-import BaseHTTPServer
 import urllib2
 import urlparse
 
+
+import simple_http_server
+
+from xlog import getLogger
+xlog = getLogger("gae_proxy")
 
 from config import config
 
@@ -23,8 +24,6 @@ current_path = os.path.dirname(os.path.abspath(__file__))
 root_path = os.path.abspath( os.path.join(current_path, os.pardir, os.pardir))
 data_root = os.path.join(root_path, 'data')
 
-#gae_proxy_listen = config.LISTEN_IP + ":" + str(config.LISTEN_PORT)
-#pac_listen = config.PAC_IP + ":" + str(config.PAC_PORT)
 gae_proxy_listen = "GOAGENT_LISTEN"
 pac_listen = "PAC_LISTEN"
 
@@ -36,7 +35,7 @@ def get_serving_pacfile():
     return serving_pacfile
 
 def get_opener():
-    autoproxy = '127.0.0.1:8087'
+    autoproxy = '127.0.0.1:%s' % config.LISTEN_PORT
 
     import ssl
     if getattr(ssl, "create_default_context", None):
@@ -280,7 +279,7 @@ class PacUtil(object):
         return function
 
 
-class PACServerHandler(BaseHTTPServer.BaseHTTPRequestHandler):
+class PACServerHandler(simple_http_server.HttpServerHandler):
     onepixel = b'GIF89a\x01\x00\x01\x00\x80\xff\x00\xc0\xc0\xc0\x00\x00\x00!\xf9\x04\x01\x00\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D\x01\x00;'
 
     def address_string(self):
